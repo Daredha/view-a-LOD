@@ -40,12 +40,11 @@ export class RicoIdentifierComponent implements OnInit {
       rico: 'https://www.ica.org/standards/RiC/ontology#',
       rdfs: 'http://www.w3.org/2000/01/rdf-schema#',
     };
-    const queryTemplate = `
-    ${wrapWithAngleBrackets(this.id)} <${prefixes.rico}hasIdentifierType>/<${prefixes.rdfs}label> ?typeLabel ; <${prefixes.rico}textualValue> ?value .`;
 
     const query = `
 SELECT distinct ?typeLabel ?value WHERE {
-${this.sparql.getFederatedQuery(queryTemplate, Settings.endpoints.hua.endpointUrls)}
+  ${wrapWithAngleBrackets(this.id)} <${prefixes.rico}hasIdentifierType>/<${prefixes.rdfs}label> ?typeLabel ;
+                                    <${prefixes.rico}textualValue> ?value .
 } LIMIT 1`;
 
     const response = await this.api.postData<

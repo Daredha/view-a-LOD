@@ -80,7 +80,21 @@ export class NodeService {
       const promise: Promise<void> = this.sparql
         .getIncomingRelations(node)
         .then((sparqlIncomingRelations) => {
+          console.log('Received incoming relations for node:', node['@id'], 'Relations:', sparqlIncomingRelations);
+          
+          // Handle empty or null results
+          if (!sparqlIncomingRelations) {
+            console.log('No incoming relations found for node:', node['@id']);
+            return;
+          }
+          
+          if (!Array.isArray(sparqlIncomingRelations)) {
+            console.error('Expected array of relations but got:', sparqlIncomingRelations);
+            return;
+          }
+
           for (const sparqlIncomingRelation of sparqlIncomingRelations) {
+            console.log('Processing relation:', sparqlIncomingRelation);
             const pred = sparqlIncomingRelation.pred;
             if (!(pred in node)) {
               node[pred] = [];
@@ -101,6 +115,10 @@ export class NodeService {
 
             node[pred].push(incomingRelation);
           }
+        })
+        .catch((error) => {
+          console.error('Error enriching node with incoming relations:', error);
+          // Don't throw here, just log the error and continue with other nodes
         });
       promises.push(promise);
     }

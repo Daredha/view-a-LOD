@@ -23,7 +23,7 @@ export class MdtoUrlBestandComponent implements OnInit {
   fileFormats?: string[];
 
   // TODO: Add complete list here
-  imgFileFormats: string[] = ['fmt/44', 'jpeg'];
+  imgFileFormats: string[] = ['fmt/44', 'jpeg'] // TODO: Add complete list here
 
   constructor(
     public api: ApiService,
@@ -39,13 +39,10 @@ export class MdtoUrlBestandComponent implements OnInit {
       return;
     }
 
-    const queryTemplate = `
-${wrapWithAngleBrackets(this.nodeId)} <http://www.nationaalarchief.nl/mdto#bestandsformaat> ?b .
-?b <http://www.nationaalarchief.nl/mdto#begripLabel> ?bestandsformaat .`;
-
     const query = `
 SELECT ?bestandsformaat WHERE {
-  ${this.sparql.getFederatedQuery(queryTemplate, [...Settings.endpoints.razu.endpointUrls, ...Settings.endpoints.kasteelAmerongen.endpointUrls])}
+  ${wrapWithAngleBrackets(this.nodeId)} <http://www.nationaalarchief.nl/mdto#bestandsformaat> ?b .
+  ?b <http://www.nationaalarchief.nl/mdto#begripLabel> ?bestandsformaat .
 } LIMIT 100`;
 
     const response = await this.api.postData<{ bestandsformaat: string }[]>(

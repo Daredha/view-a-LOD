@@ -22,35 +22,209 @@ export class SparqlService {
     private endpoints: EndpointService,
   ) {}
 
-  getFederatedQuery(
-    queryTemplate: string,
-    queryEndpoints?: EndpointUrlsModel[],
-  ): string {
-    const firstEndpoint = queryEndpoints
-      ? queryEndpoints[0].sparql
-      : this.endpoints.getFirstUrls().sparql;
-    const firstServiceQuery = `
-{
-  SERVICE <${firstEndpoint}> {
-      ${queryTemplate}
-      BIND("${firstEndpoint}" AS ?endpointUrl)
-  }
-}`;
+  async getIncomingRelations(
+    node: NodeModel,
+  ): Promise<SparqlIncomingRelationModel[]> {
+    this._ensureNodeHasId(node);
+    this._ensureEndpointsExist();
 
-    const unionEndpoints = queryEndpoints
-      ? queryEndpoints.slice(1)
-      : this.endpoints.getAllUrls().slice(1);
-    const unionServiceQueries = unionEndpoints.map(
-      (endpoint) => `
-UNION {
-    SERVICE <${endpoint.sparql}> {
-        ${queryTemplate}
-        BIND("${endpoint.sparql}" AS ?endpointUrl)
-    }
-}`,
+    const query = `
+SELECT DISTINCT ?sub ?pred WHERE {
+  ?sub ?pred <${node['@id'][0].value}>
+}
+limit 500`;
+    console.log('getIncomingRelations - SPARQL query:', query);
+    const response = await this.api.postData<any>(
+      this.endpoints.getFirstUrls().sparql,
+      {
+        query: query,
+      },
     );
 
-    return `${firstServiceQuery}\n${unionServiceQueries.join('\n')}`;
+    // Transform SPARQL JSON results format into array of SparqlIncomingRelationModel
+    if (!response.results || !Array.isArray(response.results.bindings)) {
+      console.warn('Unexpected SPARQL response format:', response);
+      return [];
+    }
+
+    return response.results.bindings.map((binding: any) => ({
+      sub: binding.sub.value,
+      pred: binding.pred.value
+    }));
+  }
+
+  async getAllParents(node: NodeModel): Promise<SparqlNodeParentModel[]> {
+    this._ensureNodeHasId(node);
+    this._ensureEndpointsExist();
+
+    const parentIris = Settings.predicates.parents.map((iri) =>
+      wrapWithAngleBrackets(iri),
+    );
+    const labelIris = Settings.predicates.label.map((iri) =>
+      wrapWithAngleBrackets(iri),
+    );
+
+    const query = `
+SELECT DISTINCT ?id ?title ?parent WHERE {
+  <${node['@id'][0].value}> ${parentIris.join('*|')}* ?id .
+  OPTIONAL { ?id ${labelIris.join('|')} ?title . }
+  OPTIONAL { ?id ${parentIris.join('|')} ?parent . }
+}
+limit 500`;
+
+    const response = await this.api.postData<any>(
+      this.endpoints.getFirstUrls().sparql,
+      {
+        query: query,
+      },
+    );
+
+    if (!response.results || !Array.isArray(response.results.bindings)) {
+      console.warn('Unexpected SPARQL response format:', response);
+      return [];
+    }
+
+    return response.results.bindings.map((binding: any) => ({
+      id: binding.id.value,
+      title: binding.title?.value,
+      parent: binding.parent?.value
+    }));
+  }
+
+  async getLabels(ids: string[]): Promise<ThingWithLabelModel[]> {
+    const idIrisStr = ids.map((id) => wrapWithAngleBrackets(id)).join('\n');
+    const labelIrisStr = Settings.predicates.label
+      .map((iri) => wrapWithAngleBrackets(iri))
+      .join('|');
+
+    const query = `
+SELECT DISTINCT ?s ?label WHERE {
+  VALUES ?s {
+    ${idIrisStr}
+  }
+  ?s ${labelIrisStr} ?label .
+}
+LIMIT 10000`;
+
+    const response = await this.api.postData<any>(
+      this.endpoints.getFirstUrls().sparql,
+      {
+        query: query,
+      },
+    );
+
+    if (!response.results || !Array.isArray(response.results.bindings)) {
+      console.warn('Unexpected SPARQL response format:', response);
+      return [];
+    }
+
+    return response.results.bindings.map((binding: any) => ({
+      '@id': binding.s.value,
+      label: binding.label.value
+    }));
+  }
+
+  async getObjIds(id: string, preds: string[]): Promise<string[]> {
+    const predsIrisStr = preds
+      .map((pred) => wrapWithAngleBrackets(pred))
+      .join('|');
+
+    const query = `
+SELECT DISTINCT ?o WHERE {
+  ${wrapWithAngleBrackets(id)} ${predsIrisStr} ?o .
+}
+LIMIT 10000`;
+
+    const response = await this.api.postData<any>(
+      this.endpoints.getFirstUrls().sparql,
+      {
+        query: query,
+      },
+    );
+
+    if (!response.results || !Array.isArray(response.results.bindings)) {
+      console.warn('Unexpected SPARQL response format:', response);
+      return [];
+    }
+
+    return response.results.bindings.map((binding: any) => binding.o.value);
+  }
+
+  async getNode(id: string): Promise<NodeModel> {
+    console.log('Retrieving node details using SPARQL...', id);
+    this._ensureEndpointsExist();
+
+    const query = `
+SELECT DISTINCT ?pred ?obj WHERE {
+  ${wrapWithAngleBrackets(id)} ?pred ?obj .
+}`;
+
+    // Try each endpoint until we find data
+    const endpointUrls = this.endpoints.getAllUrls();
+    let nodeData: { [pred: string]: NodeObj[] } = {};
+    let successfulEndpoint: string | null = null;
+
+    for (const endpoint of endpointUrls) {
+      if (!endpoint.id) {
+        console.warn('Skipping endpoint with no ID');
+        continue;
+      }
+
+      try {
+        const response = await this.api.postData<any>(endpoint.sparql, {
+          query: query,
+        });
+
+        interface Binding {
+          pred: { value: string };
+          obj: { value: string };
+        }
+
+        let results: Array<{pred: string, obj: string}>;
+
+        // Handle both formats:
+        if (response.results && Array.isArray(response.results.bindings)) {
+          results = response.results.bindings.map((binding: Binding) => ({
+            pred: binding.pred.value,
+            obj: binding.obj.value
+          }));
+        } else if (Array.isArray(response)) {
+          results = response;
+        } else {
+          console.warn('Invalid SPARQL response format from endpoint:', endpoint.id);
+          continue;
+        }
+
+        // If we got results, use this endpoint
+        if (results.length > 0) {
+          nodeData = {};
+          for (const result of results) {
+            const pred = result.pred;
+            nodeData[pred] = nodeData[pred] || [];
+            const nodeObj = {
+              value: result.obj,
+              direction: Direction.Outgoing,
+            };
+            nodeData[pred].push(nodeObj);
+          }
+          successfulEndpoint = endpoint.id;
+          break;
+        }
+      } catch (error) {
+        console.warn(`Failed to query endpoint ${endpoint.id}:`, error);
+        continue;
+      }
+    }
+
+    if (!successfulEndpoint) {
+      throw new Error(`Could not find data for node ${id} in any endpoint`);
+    }
+
+    // Add the ID and endpoint
+    nodeData['@id'] = [{ value: id }];
+    nodeData['endpointId'] = [{ value: successfulEndpoint }];
+
+    return nodeData as NodeModel;
   }
 
   private _ensureNodeHasId(node: NodeModel): void {
@@ -67,208 +241,5 @@ UNION {
     if (Object.keys(Settings.endpoints).length === 0) {
       throw new Error('No endpoints defined');
     }
-  }
-
-  async getIncomingRelations(
-    node: NodeModel,
-  ): Promise<SparqlIncomingRelationModel[]> {
-    this._ensureNodeHasId(node);
-    this._ensureEndpointsExist();
-
-    const incomingRelationsQueryTemplate = `?sub ?pred <${node['@id'][0].value}>`;
-    const query = `
-SELECT DISTINCT ?sub ?pred WHERE {
- ${this.getFederatedQuery(incomingRelationsQueryTemplate)}
-}
-
-limit 500`;
-
-    return await this.api.postData<SparqlIncomingRelationModel[]>(
-      this.endpoints.getFirstUrls().sparql,
-      {
-        query: query,
-      },
-    );
-  }
-
-  async getAllParents(node: NodeModel): Promise<SparqlNodeParentModel[]> {
-    this._ensureNodeHasId(node);
-    this._ensureEndpointsExist();
-
-    const parentIris = Settings.predicates.parents.map((iri) =>
-      wrapWithAngleBrackets(iri),
-    );
-    const labelIris = Settings.predicates.label.map((iri) =>
-      wrapWithAngleBrackets(iri),
-    );
-
-    const parentQueryTemplate = `
-    <${node['@id'][0].value}> ${parentIris.join('*|')}* ?id .
-    OPTIONAL { ?id ${labelIris.join('|')} ?title . }
-    OPTIONAL { ?id ${parentIris.join('|')} ?parent . }`;
-
-    const query = `
-SELECT DISTINCT ?id ?title ?parent WHERE {
-  ${this.getFederatedQuery(parentQueryTemplate)}
-}
-
-limit 500`;
-
-    return await this.api.postData<SparqlNodeParentModel[]>(
-      this.endpoints.getFirstUrls().sparql,
-      {
-        query: query,
-      },
-    );
-  }
-
-  // async getLabelFromLiterals(id: string): Promise<string> {
-  //   const literalLabelQueryTemplate = `
-  //   <${id}> ?p ?o .
-  //   FILTER(isLiteral(?o))
-  //   BIND(str(?o) AS ?literalValue)`;
-  //
-  //   const query = `
-  //   SELECT (GROUP_CONCAT(DISTINCT ?literalValue; separator=" ") AS ?label)
-  //   WHERE {
-  //     ${this._getFederatedQuery(literalLabelQueryTemplate)}
-  //   }`;
-  //
-  //   const labels: { label: string }[] = await this.api.postData<
-  //     { label: string }[]
-  //   >(Settings.endpoints[0].sparql, {
-  //     query: query,
-  //   });
-  //   if (!labels || labels.length === 0 || labels[0].label.length == 0) {
-  //     return replacePrefixes(id);
-  //   }
-  //   return replacePrefixes(labels[0].label);
-  // }
-
-  //   async getRdfsLabel(id: string): Promise<string> {
-  //     const labelQueryTemplate = `<${id}> <http://www.w3.org/2000/01/rdf-schema#label> ?label`;
-  //
-  //     const query = `
-  // select distinct ?label where {
-  //     ${this._getFederatedQuery(labelQueryTemplate)}
-  // }
-  // limit 1`;
-  //
-  //     const labels: { label: string }[] = await this.api.postData<
-  //       { label: string }[]
-  //     >(Settings.endpoints[0].sparql, {
-  //       query: query,
-  //     });
-  //     if (!labels || labels.length === 0) {
-  //       return this.getLabelFromLiterals(id);
-  //       // return replacePrefixes(id);
-  //     }
-  //
-  //     return replacePrefixes(labels[0].label);
-  //   }
-
-  async getLabels(ids: string[]): Promise<ThingWithLabelModel[]> {
-    const idIrisStr = ids.map((id) => wrapWithAngleBrackets(id)).join('\n');
-    const labelIrisStr = Settings.predicates.label
-      .map((iri) => wrapWithAngleBrackets(iri))
-      .join('|');
-    const labelQueryTemplate = `
-VALUES ?s {
-  ${idIrisStr}
-}
-?s ${labelIrisStr} ?label .`;
-
-    const query = `
-SELECT DISTINCT ?s ?label WHERE {
-    ${this.getFederatedQuery(labelQueryTemplate)}
-}
-LIMIT 10000`;
-
-    const response: { s: string; label: string }[] = await this.api.postData<
-      { s: string; label: string }[]
-    >(this.endpoints.getFirstUrls().sparql, {
-      query: query,
-    });
-    const labels: ThingWithLabelModel[] = response.map(({ s, label }) => {
-      return { '@id': s, label: label };
-    });
-
-    return labels;
-
-    // TODO: Bring back fallback label from literals functionality
-    // if (!labels || labels.length === 0) {
-    //   return this.getLabelFromLiterals(id);
-    //   return replacePrefixes(id);
-    // }
-    //
-    // return replacePrefixes(labels[0].label);
-  }
-
-  async getObjIds(id: string, preds: string[]): Promise<string[]> {
-    const predsIrisStr = preds
-      .map((pred) => wrapWithAngleBrackets(pred))
-      .join('/');
-    const queryTemplate = `${wrapWithAngleBrackets(id)} ${predsIrisStr} ?o .`;
-
-    const query = `
-SELECT DISTINCT ?o WHERE {
-    ${this.getFederatedQuery(queryTemplate)}
-}
-LIMIT 10000`;
-
-    const response: { o: string }[] = await this.api.postData<{ o: string }[]>(
-      this.endpoints.getFirstUrls().sparql,
-      {
-        query: query,
-      },
-    );
-    const objIds = response.map((item) => item.o);
-
-    return objIds;
-  }
-
-  async getNode(id: string): Promise<NodeModel> {
-    console.log('Retrieving node details using SPARQL...', id);
-    this._ensureEndpointsExist();
-
-    const queryTemplate = `${wrapWithAngleBrackets(id)} ?pred ?obj .`;
-
-    const query = `SELECT DISTINCT ?pred ?obj ?endpointUrl WHERE {
-        ${this.getFederatedQuery(queryTemplate)}
-    }`;
-
-    const results = await this.api.postData<SparqlPredObjModel[]>(
-      this.endpoints.getFirstUrls().sparql,
-      {
-        query: query,
-      },
-    );
-    const nodeData: { [pred: string]: NodeObj[] } = {};
-    const endpointIds: Set<string> = new Set();
-
-    for (const result of results) {
-      if (result.endpointUrl) {
-        const endpointId = this.endpoints.getIdBySparqlUrl(result.endpointUrl);
-        endpointIds.add(endpointId);
-      }
-
-      const pred = result.pred;
-      nodeData[pred] = nodeData[pred] || [];
-      const nodeObj = {
-        value: result.obj,
-        direction: Direction.Outgoing,
-      };
-      nodeData[pred].push(nodeObj);
-    }
-
-    const endpointIdsObjs: NodeObj[] = Array.from(endpointIds).map((id) => {
-      return { value: id, direction: Direction.Outgoing } as NodeObj;
-    });
-
-    return {
-      '@id': [{ value: id, direction: Direction.Outgoing }],
-      endpointId: endpointIdsObjs,
-      ...nodeData,
-    };
   }
 }

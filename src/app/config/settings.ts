@@ -172,6 +172,15 @@ const visualMaterialValueIds = [
 
 export const Settings = {
   endpoints: {
+    local: {
+      label: 'Local',
+      endpointUrls: [
+        {
+          elastic: 'http://localhost:9200/_search',
+          sparql: 'http://localhost:8890/sparql',
+        },
+      ],
+    },
     hua: {
       label: 'Het Utrechts Archief',
       endpointUrls: [
